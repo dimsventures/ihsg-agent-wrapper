@@ -5,8 +5,8 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-ALPHA_KEY = os.environ.get("10S3WO1UJULSIR4K")
-FRED_KEY  = os.environ.get("8441939bdde9fabd12e1b43a5f21b272")
+ALPHA_KEY = os.environ.get("ALPHA_VANTAGE_KEY")
+FRED_KEY  = os.environ.get("FRED_KEY")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -104,6 +104,7 @@ def market_all():
 
     # ── Alpha Vantage: equity & commodity ────────────────────────────────────
     alpha_targets = {
+        "ihsg":  "JKSE",      # Jakarta Composite
         "sp500": "SPY",       # S&P 500 proxy ETF
         "gold":  "GLD",       # Gold ETF proxy
     }

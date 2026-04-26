@@ -1,77 +1,154 @@
 from flask import Flask, jsonify
-import yfinance as yf
 import requests
-from requests import Session
+import os
 from datetime import datetime
-import traceback
 
 app = Flask(__name__)
 
-# Session dengan headers supaya tidak diblok Yahoo Finance
-def create_session():
-    session = Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-    })
-    return session
+ALPHA_KEY = os.environ.get("10S3WO1UJULSIR4K")
+FRED_KEY  = os.environ.get("8441939bdde9fabd12e1b43a5f21b272")
 
-TICKERS = {
-    "ihsg":    "^JKSE",
-    "dxy":     "DX-Y.NYB",
-    "gold":    "GC=F",
-    "vix":     "^VIX",
-    "us10y":   "^TNX",
-    "us2y":    "^IRX",
-    "sp500":   "^GSPC",
-    "usd_idr": "IDR=X",
-}
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def get_price_data(symbol, period="5d"):
-    try:
-        session = create_session()
-        ticker = yf.Ticker(symbol, session=session)
-        hist = ticker.history(period=period)
-        if hist.empty:
-            return None
-        latest = hist.iloc[-1]
-        prev   = hist.iloc[-2] if len(hist) >= 2 else hist.iloc[-1]
-        close      = round(float(latest["Close"]), 4)
-        prev_close = round(float(prev["Close"]), 4)
-        change_pct = round((close - prev_close) / prev_close * 100, 2)
-        return {
-            "close":      close,
-            "prev_close": prev_close,
-            "change_pct": change_pct,
-            "volume":     int(latest.get("Volume", 0)),
-            "date":       str(hist.index[-1].date()),
-        }
-    except Exception as e:
-        raise Exception(f"Failed to fetch {symbol}: {str(e)}")
+def alpha_quote(symbol):
+    """Global quote dari Alpha Vantage."""
+    url = "https://www.alphavantage.co/query"
+    params = {
+        "function": "GLOBAL_QUOTE",
+        "symbol":   symbol,
+        "apikey":   ALPHA_KEY,
+    }
+    r = requests.get(url, params=params, timeout=15)
+    r.raise_for_status()
+    data = r.json().get("Global Quote", {})
+    if not data or not data.get("05. price"):
+        return None
+    close      = round(float(data["05. price"]), 4)
+    prev_close = round(float(data["08. previous close"]), 4)
+    change_pct = round(float(data["10. change percent"].replace("%", "")), 2)
+    return {
+        "close":      close,
+        "prev_close": prev_close,
+        "change_pct": change_pct,
+        "volume":     int(float(data.get("06. volume", 0))),
+        "date":       data.get("07. latest trading day", ""),
+    }
+
+
+def alpha_forex(from_currency, to_currency):
+    """Exchange rate dari Alpha Vantage."""
+    url = "https://www.alphavantage.co/query"
+    params = {
+        "function":      "CURRENCY_EXCHANGE_RATE",
+        "from_currency": from_currency,
+        "to_currency":   to_currency,
+        "apikey":        ALPHA_KEY,
+    }
+    r = requests.get(url, params=params, timeout=15)
+    r.raise_for_status()
+    data = r.json().get("Realtime Currency Exchange Rate", {})
+    if not data:
+        return None
+    rate = round(float(data["5. Exchange Rate"]), 4)
+    return {
+        "close":      rate,
+        "prev_close": None,
+        "change_pct": None,
+        "date":       data.get("6. Last Refreshed", ""),
+    }
+
+
+def fred_series(series_id):
+    """Ambil nilai terbaru dari FRED."""
+    url = "https://api.stlouisfed.org/fred/series/observations"
+    params = {
+        "series_id":      series_id,
+        "api_key":        FRED_KEY,
+        "file_type":      "json",
+        "sort_order":     "desc",
+        "limit":          2,
+    }
+    r = requests.get(url, params=params, timeout=15)
+    r.raise_for_status()
+    obs = r.json().get("observations", [])
+    if not obs:
+        return None
+    latest = obs[0]
+    prev   = obs[1] if len(obs) > 1 else obs[0]
+    val      = float(latest["value"])
+    prev_val = float(prev["value"])
+    change_pct = round((val - prev_val) / prev_val * 100, 4) if prev_val else None
+    return {
+        "close":      round(val, 4),
+        "prev_close": round(prev_val, 4),
+        "change_pct": change_pct,
+        "date":       latest["date"],
+    }
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
+    return jsonify({
+        "status":    "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "alpha_key": "set" if ALPHA_KEY else "MISSING",
+        "fred_key":  "set" if FRED_KEY  else "MISSING",
+    })
 
 
 @app.route("/market/all")
 def market_all():
     result, errors = {}, {}
-    for name, symbol in TICKERS.items():
+
+    # ── Alpha Vantage: equity & commodity ────────────────────────────────────
+    alpha_targets = {
+        "ihsg":  "JKSE",      # Jakarta Composite
+        "sp500": "SPY",       # S&P 500 proxy ETF
+        "gold":  "GLD",       # Gold ETF proxy
+    }
+    for name, symbol in alpha_targets.items():
         try:
-            data = get_price_data(symbol)
+            data = alpha_quote(symbol)
             if data:
                 result[name] = data
             else:
-                errors[name] = "empty data"
+                errors[name] = "empty data from Alpha Vantage"
         except Exception as e:
             errors[name] = str(e)
+
+    # ── Alpha Vantage: Forex ──────────────────────────────────────────────────
+    try:
+        usd_idr = alpha_forex("USD", "IDR")
+        if usd_idr:
+            result["usd_idr"] = usd_idr
+        else:
+            errors["usd_idr"] = "empty data"
+    except Exception as e:
+        errors["usd_idr"] = str(e)
+
+    # ── FRED: macro indicators ────────────────────────────────────────────────
+    fred_targets = {
+        "fed_rate": "FEDFUNDS",   # Fed Funds Rate
+        "us10y":    "DGS10",      # 10Y Treasury
+        "us2y":     "DGS2",       # 2Y Treasury
+        "walcl":    "WALCL",      # Fed Balance Sheet
+        "m2_us":    "M2SL",       # US M2
+        "cpi":      "CPIAUCSL",   # CPI
+        "nfp":      "PAYEMS",     # Non-Farm Payroll
+        "dxy":      "DTWEXBGS",   # DXY proxy (broad dollar index)
+    }
+    for name, series_id in fred_targets.items():
+        try:
+            data = fred_series(series_id)
+            if data:
+                result[name] = data
+            else:
+                errors[name] = "empty data from FRED"
+        except Exception as e:
+            errors[name] = str(e)
+
     return jsonify({
         "timestamp": datetime.utcnow().isoformat(),
         "data":      result,
@@ -79,34 +156,30 @@ def market_all():
     })
 
 
-@app.route("/market/<ticker_name>")
-def market_single(ticker_name):
-    if ticker_name not in TICKERS:
-        return jsonify({"error": f"Unknown ticker '{ticker_name}'"}), 404
-    try:
-        data = get_price_data(TICKERS[ticker_name])
-        if not data:
-            return jsonify({"error": "No data returned"}), 502
-        return jsonify({"ticker": ticker_name, **data})
-    except Exception as e:
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
-
-
-@app.route("/market/ihsg/history")
-def ihsg_history():
-    try:
-        session = create_session()
-        ticker = yf.Ticker("^JKSE", session=session)
-        hist   = ticker.history(period="1mo")
-        rows   = []
-        for date, row in hist.iterrows():
-            rows.append({
-                "date":  str(date.date()),
-                "close": round(float(row["Close"]), 2),
-            })
-        return jsonify({"data": rows})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.route("/market/macro")
+def market_macro():
+    """Hanya FRED data — untuk N8N macro filter node."""
+    result, errors = {}, {}
+    fred_targets = {
+        "fed_rate": "FEDFUNDS",
+        "us10y":    "DGS10",
+        "us2y":     "DGS2",
+        "walcl":    "WALCL",
+        "m2_us":    "M2SL",
+        "cpi":      "CPIAUCSL",
+        "nfp":      "PAYEMS",
+        "dxy":      "DTWEXBGS",
+    }
+    for name, series_id in fred_targets.items():
+        try:
+            data = fred_series(series_id)
+            if data:
+                result[name] = data
+            else:
+                errors[name] = "empty"
+        except Exception as e:
+            errors[name] = str(e)
+    return jsonify({"timestamp": datetime.utcnow().isoformat(), "data": result, "errors": errors})
 
 
 if __name__ == "__main__":

@@ -104,7 +104,6 @@ def market_all():
 
     # ── Alpha Vantage: equity & commodity ────────────────────────────────────
     alpha_targets = {
-        "ihsg":  "JKSE",      # Jakarta Composite
         "sp500": "SPY",       # S&P 500 proxy ETF
         "gold":  "GLD",       # Gold ETF proxy
     }
